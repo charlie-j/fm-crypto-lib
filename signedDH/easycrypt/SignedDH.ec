@@ -30,24 +30,26 @@ require (*--*) St_CDH_abstract SUFCMA UATPaKE.
 (** Types and operators for the DH group **)
 type pdh, sdh, sskey.
 
-op [lossless] dkp: (pdh * sdh) distr.
-op shared_key: pdh -> sdh -> pdh.
+op g: pdh.
+op [lossless] dsk: sdh distr.
+op (^): pdh -> sdh -> pdh.
 
-axiom shared_keyC X x Y y:
-     (X, x) \in dkp
-  => (Y, y) \in dkp
-  => shared_key X y = shared_key Y x.
+axiom shared_keyC x y:
+     x \in dsk
+  => y \in dsk
+  => (g ^ x) ^ y = (g ^ y) ^ x.
 
 op [lossless full uniform] dssk: sskey distr.
 
 (** Instantiate the GapDH theory **)
 clone import St_CDH_abstract as StCDH with
-  type pkey       <= pdh,
-  type skey       <= sdh,
-  op   dkp        <= dkp,
-  op   shared_key <= shared_key
+  type pkey <= pdh,
+  type skey <= sdh,
+  op   g    <= g,
+  op   dsk  <= dsk,
+  op   (^)  <= (^)
 proof *.
-realize dkp_ll by exact: dkp_ll.
+realize dsk_ll by exact: dsk_ll.
 realize shared_keyC by exact: shared_keyC.
 
 (** Additional types for the signature scheme **)
@@ -64,9 +66,9 @@ proof *.
 (** Additional types for defining protocols,
     plus RO instantiation
 **)
-type client_state = { s_id: pkey;    (* The server's identity, as its public key *)
-                      x_pk: pdh;     (* The client's ephemeral public key *)
-                      x_sk: sdh   }. (* The client's ephemeral secret *)
+type client_state = { pk: pkey;     (* The server's identity, as its public key *)
+                      epk: pdh;     (* The client's ephemeral public key *)
+                      esk: sdh   }. (* The client's ephemeral secret *)
 
 clone import FullRO as H with
   type in_t    <= pdh * pdh * pdh,
@@ -102,21 +104,21 @@ module SignedDH (S : SigScheme) (H : RO) : UATPaKE = {
     return kp;
   }
 
-  proc init(s_id) = {
-    var x_pk, x_sk;
+  proc init(pk) = {
+    var x_sk;
 
-    (x_pk, x_sk) <$ dkp;
-    return ({| s_id = s_id; x_pk = x_pk; x_sk = x_sk |}, x_pk);
+    x_sk <$ dsk;
+    return ({| pk = pk; epk = g ^ x_sk; esk = x_sk |}, g ^ x_sk);
   }
 
   proc resp(sk_s, x_pk) = {
-    var y_pk, y_sk, s, ss, ks;
+    var y_sk, s, ss, ks;
 
-    (y_pk, y_sk) <$ dkp;
-    s <@ S.sign(sk_s, (x_pk, y_pk));
-    ss <- shared_key x_pk y_sk;
-    ks <@ H.get(ss, x_pk, y_pk);
-    return (ks, (y_pk, s));
+    y_sk <$ dsk;
+    s <@ S.sign(sk_s, (x_pk, g ^ y_sk));
+    ss <- x_pk ^ y_sk;
+    ks <@ H.get(x_pk, g ^ y_sk, ss);
+    return (ks, (g ^ y_sk, s));
   }
 
   proc recv(st, c) = {
@@ -124,13 +126,195 @@ module SignedDH (S : SigScheme) (H : RO) : UATPaKE = {
     var r <- None;
 
     (y_pk, s) <- c;
-    b <@ S.verify(s_id st, (x_pk st, y_pk), s);
+    b <@ S.verify(st.`pk, (g ^ st.`esk,  y_pk), s);
     if (b) {
-      ss <- shared_key y_pk (x_sk st);
-      kc <@ H.get(ss, x_pk st, y_pk);
+      ss <- y_pk ^ st.`esk;
+      kc <@ H.get(g ^ st.`esk, y_pk, ss);
       r <- Some kc;
     }
     return r;
+  }
+}.
+
+module B2 (S : SigScheme) (A : Adv_UATPaKE_RO) (O : St_CDH_Oracles) = {
+  include var Exp_b(SignedDH(S), RO, A) [-run]
+
+  var h_map : (pdh option * pdh * pdh, sskey) fmap
+
+  module Oracles = {
+    proc h'(x, y) = {
+      var k;
+
+      if ((None, x, y) \notin h_map) {
+        k <$ dssk;
+        h_map.[None, x, y] <- k;
+      }
+      return oget h_map.[None, x, y];
+    }
+
+    proc h(z, x, y) = {
+      var k, ko, b;
+
+      ko <- None;
+      if ((Some z, x, y) \notin h_map) {
+        b <@ O.ddh(x, y, z);
+        if (has (fun _ c=> c = x) i_map /\ b) {
+          k <@ h'(x, y);
+          ko <- Some k;
+        } else {
+          k <$ dssk;
+          h_map.[Some z, x, y] <- k;
+          ko <- Some k;
+        }
+      } else {
+        ko <- h_map.[Some z, x, y];
+      }
+      return oget ko;
+    }
+      
+    proc gen(): pkey = {
+      var pk, sk;
+
+      (pk, sk) <@ S.keygen();
+      if (has (fun i st=> st.`pk = pk /\ p_map.[i] = None) c_map) {
+        pk <- witness;
+      } else {
+        m <- m + 1;
+        pk_map.[m] <- pk;
+        sk_map.[m] <- sk;
+      }
+      
+      return pk;
+    }
+
+    proc corrupt(j: int): skey option = {
+      var r <- None;
+
+      if (0 < j <= m) {
+        r <- sk_map.[j];
+        cr <- cr `|` fset1 j;
+      }
+      return r;
+    }
+
+    proc expose(i) = {
+      var pk, x;
+      var r <- None;
+
+      if (0 < i <= n /\ i \notin ich) {
+        xp <- xp `|` fset1 i;
+        pk <- (oget c_map.[i]).`pk;
+        x <@ O.corrupt_1(i);
+        r <- Some {| pk = pk; epk = g ^ oget x; esk = oget x |};
+      }
+      return r;
+    }
+
+    proc init(pk: pkey): pdh = {
+      var st, jo, c, epk;
+
+      n <- n + 1;
+      epk <@ O.gen_1();
+      st <- {| pk = pk; epk = epk; esk = witness; |};
+      c_map.[n] <- st;
+      jo <- find (fun _ pk_j=> pk_j = pk) pk_map;
+      if (jo is Some j) {
+        p_map.[n] <- j;
+        i_map.[n] <- c;
+      }
+      return c;
+    }
+
+    proc respond(j: int, c: pdh, ch: bool): (sskey * (pdh * sig)) option = {
+      var k, c', io, sk_j, h, y, sig;
+      var r <- None;
+
+      if (0 < j <= m) {
+        if (has (fun i j' => j' = j /\ i_map.[i] = Some c) p_map) {
+          h <@ O.gen_2();
+        } else {
+          y <$ dsk;
+          h <- g ^ y;
+        }
+        sk_j <- oget sk_map.[j];
+        sig <@ S.sign(sk_j, (c, h));
+        if (has (fun i j' => j' = j /\ i_map.[i] = Some c) p_map) {
+          k <@ h'(c, h);
+        } else {
+          k <@ RO.get(c, h, c ^ y);
+        }
+        c' <- (h, sig);
+        io <- find (fun i j' => j' = j /\ i_map.[i] = Some c) p_map;
+        if (io is Some i) {
+          (*** Instead of initialising all of r_map to output the
+          empty set, we read undefined entries as the empty set
+          here. ***)
+          r_map.[Some j, i] <- (odflt fset0 r_map.[Some j, i]) `|` fset1 c';
+          if (ch /\ i \notin xp) {
+            ich <- ich `|` fset1 i;
+          }
+        }
+        r <- Some (k, c');
+      }
+      return r;
+    }
+
+    proc receive(i: int, c: pdh * sig, ch: bool): sskey option = {
+      var st_i, k, h, sig, b;
+      var ko <- None;
+
+      if (0 < i <= n /\ i \notin q) {
+        st_i <- oget c_map.[i];
+        q <- q `|` fset1 i;
+        
+        if (c \notin odflt fset0 r_map.[p_map.[i], i]) {
+          (h, sig) <- c;
+          b <@ S.verify(st_i.`pk, (st_i.`epk, h), sig);
+          if (b) {
+            k <@ h'(st_i.`epk, h);
+            ko <- Some k;
+          }
+          if (   ch
+              /\ i \notin xp
+              /\ p_map.[i] <> None /\ 0 < oget p_map.[i] <= m /\ oget p_map.[i] \notin cr
+              /\ ko <> None) {
+            (* Spec says "Stop" *)
+            ich <- ich `|` fset1 i;
+          }
+        }
+      }
+      return ko;
+    }
+
+  }
+
+  proc solve() = {
+    var b';
+
+    RO.init();
+
+    b_ror <- witness;
+
+    m <- 0;
+    n <- 0;
+
+    q <- fset0;
+    ich <- fset0;
+    rch <- fset0;
+    xp <- fset0;
+    cr <- fset0;
+
+    p_map <- empty;
+    i_map <- empty;
+    r_map <- empty;
+
+    pk_map <- empty;
+    sk_map <- empty;
+    c_map <- empty;
+
+    h_map <- empty;
+
+    b' <@ A(Oracles).distinguish();
   }
 }.
 
@@ -139,31 +323,7 @@ declare module S <: SigScheme { -Exp_b, -RO }.
 declare module A <: Adv_UATPaKE_RO { -Exp_b, -RO, -S }.
 
 local module Game0_b = {
-  (* The challenge bit *)
-  var b_ror : bool
-
-  (* Server maps: *)
-  var m: int
-  (* - server handle to keypair *)
-  var pk_map: (int, pkey) fmap
-  var sk_map: (int, skey) fmap
-  (* - server-client handle to partial trace *)
-  var r_map: (int option * int, (pdh * sig) fset) fmap
-
-  (* Client maps: *)
-  var n: int
-  (* - client handle to state *)
-  var c_map: (int, client_state) fmap
-  (* - client handle to intended partner *)
-  var p_map: (int, int) fmap
-  (* - client handle to partial trace (early partnering) *)
-  var i_map: (int, pdh) fmap
-
-  var q   : int fset
-  var ich : int fset
-  var rch : int fset
-  var xp  : int fset
-  var cr  : int fset
+  include var Exp_b(SignedDH(S), RO, A) [-run]
 
   module Oracles = {
     proc gen(): pkey = {
@@ -197,11 +357,12 @@ local module Game0_b = {
     }
 
     proc init(pk: pkey): pdh = {
-      var st, jo, c, x;
+      var st, jo, x, c;
 
       n <- n + 1;
-      (c, x) <$ dkp;
-      st <- {| s_id = pk; x_pk = c; x_sk = x |};
+      x <$ dsk;
+      c <- g ^ x;
+      st <- {| pk = pk; epk = g ^ x; esk = x |};
       c_map.[n] <- st;
       jo <- find (fun _ pk_j=> pk_j = pk) pk_map;
       if (jo is Some j) {
@@ -217,10 +378,11 @@ local module Game0_b = {
 
       if (0 < j <= m) {
         sk_j <- oget sk_map.[j];
-        (h, y) <$ dkp;
+        y <$ dsk;
+        h <- g ^ y;
         sig <@ S.sign(sk_j, (c, h));
         c' <- (h, sig);
-        k <@ RO.get(shared_key c y, c, h);
+        k <@ RO.get(c, h, c ^ y);
         io <- find (fun i _=> p_map.[i] = Some j /\ i_map.[i] = Some c) c_map;
         if (io is Some i) {
           (*** Instead of initialising all of r_map to output the
@@ -247,9 +409,9 @@ local module Game0_b = {
         
         if (c \notin odflt fset0 r_map.[p_map.[i], i]) {
           (h, sig) <- c;
-          b <@ S.verify(s_id st_i, (x_pk st_i, h), sig);
+          b <@ S.verify(st_i.`pk, (st_i.`epk, h), sig);
           if (b) {
-            k <@ RO.get(shared_key h (x_sk st_i), x_pk st_i, h);
+            k <@ RO.get(st_i.`epk, h, h ^ st_i.`esk);
             ko <- Some k;
           }
           if (   ch
@@ -308,53 +470,542 @@ have ^ + -> - -> //:
 move=> b; byequiv (: ={glob A, glob S, arg} ==> ={res})=> //.
 proc.
 (* The calls are equivalent due to equality on a bunch of variables *)
-call (: ={glob S, glob RO, b_ror, m, n, q, ich, rch, xp, cr,
-          c_map, p_map, i_map, r_map, pk_map, sk_map}(Exp_b, Game0_b));
-  last first.
+call (: ={glob Exp_b(SignedDH(S), RO)}); last first.
 (* The invariant holds initially and allows us to conclude *)
 + by inline *; auto.
 (* The invariant is preserved by all oracles *)
 + by proc; inline *; auto; call (: true); auto.
 + by proc; inline *; auto.
 + by proc; inline *; auto.
-+ proc; inline *.
-  swap {1} 3 -2. swap {2} 2 -1.
-  seq 1 1: (#pre /\ (x_pk, x_sk){1} = (c, x){2}).
-  + by auto.
-  sp 5 4. match =; 1,2:by auto.
-  by move=> j; auto.
++ by proc; inline *; sim; auto.
 + proc; inline *; sp; if; auto.
-  swap {1} 4 -3. swap {2} 2 -1.
-  swap {1} 8 -7. swap {2} 6 -5.
-  seq 2 2: (#pre /\ (y_pk, y_sk){1} = (h, y){2} /\ ={r0}).
-  + by auto.
-  sp; seq 1 1: (#pre /\ s{1} = sig{2}).
-  + by call (: true).
-  sp 2 2.
-  seq 1 1: #pre.
-  + by auto.
-  sp 3 2.
-  match =; 1,2:by auto.
-  by move=> i; sp; if; auto; if; auto.
+  sim; auto.
+  by call (: true); auto.
 + proc; sp; if; auto; sp; if; auto.
   inline {1} 1.
-  sp; seq 1 1: (#pre /\ ={b}).
-  + call (: true); auto=> /> &2.
-    move=> qR _ _ i_notin_qR _; exists qR=> //=.
-    by exists qR.
-  if; 1:by auto.
-  + sp; seq 1 1: (#pre /\ kc{1} = k{2}).
-    + call (: ={glob RO, arg} ==> ={glob RO, res}).
-      + by sim.
-      auto=> /> &2 qR _ _ i_notin_qR _ _; exists qR=> //=.
-      by exists qR.
-    sp; if; auto.
-    by if; auto.
-  rcondf {1} 2; 1:by auto.
-  rcondf {2} 1; 1:by auto.
-  by auto.
+  sim.
+  admit.
 + conseq (: _ ==> ={glob RO, res})=> //.
   by sim.
 qed.
 
+local module Game1_b = {
+  include var Exp_b(SignedDH(S), RO, A) [-run]
+
+  var bad_1: bool
+  var bad_2: bool
+
+  module Oracles = {
+    proc gen(): pkey = {
+      var pk, sk;
+
+      (pk, sk) <@ S.keygen();
+      if (has (fun i st=> st.`pk = pk /\ p_map.[i] = None) c_map) {
+        bad_1 <- true;
+        (* Here, we don't stop; we just don't actually register the key and move on *)
+        pk <- witness;
+      } else {
+        m <- m + 1;
+        pk_map.[m] <- pk;
+        sk_map.[m] <- sk;
+      }
+      
+      return pk;
+    }
+
+    proc corrupt(j: int): skey option = {
+      var r <- None;
+
+      if (0 < j <= m) {
+        r <- sk_map.[j];
+        cr <- cr `|` fset1 j;
+      }
+      return r;
+    }
+
+    proc expose(i) = {
+      var r <- None;
+
+      if (0 < i <= n /\ i \notin ich) {
+        xp <- xp `|` fset1 i;
+        r <- c_map.[i];
+      }
+      return r;
+    }
+
+    proc init(pk: pkey): pdh = {
+      var st, jo, c, x;
+
+      n <- n + 1;
+      x <$ dsk;
+      c <- g ^ x;
+      st <- {| pk = pk; epk = c; esk = x |};
+      c_map.[n] <- st;
+      jo <- find (fun _ pk_j=> pk_j = pk) pk_map;
+      if (jo is Some j) {
+        p_map.[n] <- j;
+        i_map.[n] <- c;
+      }
+      return c;
+    }
+
+    proc respond(j: int, c: pdh, ch: bool): (sskey * (pdh * sig)) option = {
+      var k, c', io, sk_j, h, y, sig;
+      var r <- None;
+
+      if (0 < j <= m) {
+        sk_j <- oget sk_map.[j];
+        y <$ dsk;
+        h <- g ^ y;
+        sig <@ S.sign(sk_j, (c, h));
+        c' <- (h, sig);
+        k <@ RO.get(c, h, c ^ y);
+        io <- find (fun i _=> p_map.[i] = Some j /\ i_map.[i] = Some c) c_map;
+        if (io is Some i) {
+          (*** Instead of initialising all of r_map to output the
+          empty set, we read undefined entries as the empty set
+          here. ***)
+          r_map.[Some j, i] <- (odflt fset0 r_map.[Some j, i]) `|` fset1 c';
+          if (ch /\ i \notin xp) {
+            if (b_ror) { k <$ dssk; }
+            ich <- ich `|` fset1 i;
+          }
+        }
+        r <- Some (k, c');
+      }
+      return r;
+    }
+
+    proc receive(i: int, c: pdh * sig, ch: bool): sskey option = {
+      var st_i, k, h, sig, b;
+      var ko <- None;
+
+      if (0 < i <= n /\ i \notin q) {
+        st_i <- oget c_map.[i];
+        q <- q `|` fset1 i;
+        
+        if (c \notin odflt fset0 r_map.[p_map.[i], i]) {
+          (h, sig) <- c;
+          b <@ S.verify(st_i.`pk, (st_i.`epk, h), sig);
+          if (b) {
+            k <@ RO.get(st_i.`epk, h, h ^ st_i.`esk);
+            ko <- Some k;
+          }
+          if (   ch
+              /\ i \notin xp
+              /\ p_map.[i] <> None /\ 0 < oget p_map.[i] <= m /\ oget p_map.[i] \notin cr
+              /\ ko <> None) {
+            if (b_ror) { k <$ dssk; ko <- Some k; }
+            ich <- ich `|` fset1 i;
+          }
+        }
+      }
+      return ko;
+    }
+
+    proc h = RO.get
+  }
+
+  proc run(b) = {
+    var b';
+
+    RO.init();
+
+    b_ror <- b;
+
+    m <- 0;
+    n <- 0;
+
+    q <- fset0;
+    ich <- fset0;
+    rch <- fset0;
+    xp <- fset0;
+    cr <- fset0;
+
+    p_map <- empty;
+    i_map <- empty;
+    r_map <- empty;
+
+    pk_map <- empty;
+    sk_map <- empty;
+    c_map <- empty;
+
+    bad_1 <- false;
+    bad_2 <- false;
+
+    b' <@ A(Oracles).distinguish();
+    return b';
+  }
+}.
+
+local lemma Hop1 b &m:
+  `|Pr[Game0_b.run(b) @ &m: res] - Pr[Game1_b.run(b) @ &m: res]|
+  <= Pr[Game1_b.run(b) @ &m: Game1_b.bad_1].
+admitted.
+
+local module Game2_b = {
+  include var Exp_b(SignedDH(S), RO, A) [-run]
+  include var Game1_b [-run]
+
+  module Oracles = {
+    proc gen(): pkey = {
+      var pk, sk;
+
+      (pk, sk) <@ S.keygen();
+      if (has (fun i st=> st.`pk = pk /\ p_map.[i] = None) c_map) {
+        bad_1 <- true;
+        (* Here, we don't stop; we just don't actually register the key and move on *)
+        pk <- witness;
+      } else {
+        m <- m + 1;
+        pk_map.[m] <- pk;
+        sk_map.[m] <- sk;
+      }
+      
+      return pk;
+    }
+
+    proc corrupt(j: int): skey option = {
+      var r <- None;
+
+      if (0 < j <= m) {
+        r <- sk_map.[j];
+        cr <- cr `|` fset1 j;
+      }
+      return r;
+    }
+
+    proc expose(i) = {
+      var r <- None;
+
+      if (0 < i <= n /\ i \notin ich) {
+        xp <- xp `|` fset1 i;
+        r <- c_map.[i];
+      }
+      return r;
+    }
+
+    proc init(pk: pkey): pdh = {
+      var st, jo, c, x;
+
+      n <- n + 1;
+      x <$ dsk;
+      c <- g ^ x;
+      st <- {| pk = pk; epk = c; esk = x |};
+      c_map.[n] <- st;
+      jo <- find (fun _ pk_j=> pk_j = pk) pk_map;
+      if (jo is Some j) {
+        p_map.[n] <- j;
+        i_map.[n] <- c;
+      }
+      return c;
+    }
+
+    proc respond(j: int, c: pdh, ch: bool): (sskey * (pdh * sig)) option = {
+      var k, c', io, sk_j, h, y, sig;
+      var r <- None;
+
+      if (0 < j <= m) {
+        sk_j <- oget sk_map.[j];
+        y <$ dsk;
+        h <- g ^ y;
+        sig <@ S.sign(sk_j, (c, h));
+        c' <- (h, sig);
+        k <@ RO.get(c, h, c ^ y);
+        io <- find (fun i _=> p_map.[i] = Some j /\ i_map.[i] = Some c) c_map;
+        if (io is Some i) {
+          (*** Instead of initialising all of r_map to output the
+          empty set, we read undefined entries as the empty set
+          here. ***)
+          r_map.[Some j, i] <- (odflt fset0 r_map.[Some j, i]) `|` fset1 c';
+          if (ch /\ i \notin xp) {
+            if (b_ror) { k <$ dssk; }
+            ich <- ich `|` fset1 i;
+          }
+        }
+        r <- Some (k, c');
+      }
+      return r;
+    }
+
+    proc receive(i: int, c: pdh * sig, ch: bool): sskey option = {
+      var st_i, k, h, sig, b;
+      var ko <- None;
+
+      if (0 < i <= n /\ i \notin q) {
+        st_i <- oget c_map.[i];
+        q <- q `|` fset1 i;
+        
+        if (c \notin odflt fset0 r_map.[p_map.[i], i]) {
+          (h, sig) <- c;
+          b <@ S.verify(st_i.`pk, (st_i.`epk, h), sig);
+          if (b) {
+            k <@ RO.get(st_i.`epk, h, h ^ st_i.`esk);
+            ko <- Some k;
+          }
+          if (   ch
+              /\ i \notin xp
+              /\ p_map.[i] <> None /\ 0 < oget p_map.[i] <= m /\ oget p_map.[i] \notin cr
+              /\ ko <> None) {
+            bad_2 <- true;
+            ko <- None;
+            ich <- ich `|` fset1 i;
+          }
+        }
+      }
+      return ko;
+    }
+
+    proc h = RO.get
+  }
+
+  proc run(b) = {
+    var b';
+
+    RO.init();
+
+    b_ror <- b;
+
+    m <- 0;
+    n <- 0;
+
+    q <- fset0;
+    ich <- fset0;
+    rch <- fset0;
+    xp <- fset0;
+    cr <- fset0;
+
+    p_map <- empty;
+    i_map <- empty;
+    r_map <- empty;
+
+    pk_map <- empty;
+    sk_map <- empty;
+    c_map <- empty;
+
+    bad_1 <- false;
+    bad_2 <- false;
+
+    b' <@ A(Oracles).distinguish();
+    return b';
+  }
+}.
+
+local lemma Hop2 b &m:
+  `|Pr[Game1_b.run(b) @ &m: res] - Pr[Game2_b.run(b) @ &m: res]|
+  <= Pr[Game2_b.run(b) @ &m: Game1_b.bad_2].
+admitted.
+
+local module Game3_b = {
+  include var Exp_b(SignedDH(S), RO, A) [-run]
+  include var Game1_b [-run]
+
+  var h_map : (pdh option * pdh * pdh, sskey) fmap
+
+  module Oracles = {
+    proc h'(x, y) = {
+      var k;
+
+      if ((None, x, y) \notin h_map) {
+        k <$ dssk;
+        h_map.[None, x, y] <- k;
+      }
+      return oget h_map.[None, x, y];
+    }
+
+    proc h(z, x, y) = {
+      var io, st_i, k, ko;
+
+      ko <- None;
+      if ((Some z, x, y) \notin h_map) {
+        io <- find (fun _ c=> c = x) i_map;
+        if (io is Some i) {
+          st_i <- oget c_map.[i];
+          if (z = y ^ st_i.`esk) {
+            k <@ h'(x, y);
+            ko <- Some k;
+          }
+        }
+        if (ko is None) {
+          k <$ dssk;
+          h_map.[Some z, x, y] <- k;
+          ko <- Some k;
+        }
+      } else {
+        ko <- h_map.[Some z, x, y];
+      }
+      return oget ko;
+    }
+      
+    proc gen(): pkey = {
+      var pk, sk;
+
+      (pk, sk) <@ S.keygen();
+      if (has (fun i st=> st.`pk = pk /\ p_map.[i] = None) c_map) {
+        bad_1 <- true;
+        (* Here, we don't stop; we just don't actually register the key and move on *)
+        pk <- witness;
+      } else {
+        m <- m + 1;
+        pk_map.[m] <- pk;
+        sk_map.[m] <- sk;
+      }
+      
+      return pk;
+    }
+
+    proc corrupt(j: int): skey option = {
+      var r <- None;
+
+      if (0 < j <= m) {
+        r <- sk_map.[j];
+        cr <- cr `|` fset1 j;
+      }
+      return r;
+    }
+
+    proc expose(i) = {
+      var r <- None;
+
+      if (0 < i <= n /\ i \notin ich) {
+        xp <- xp `|` fset1 i;
+        r <- c_map.[i];
+      }
+      return r;
+    }
+
+    proc init(pk: pkey): pdh = {
+      var st, jo, c, x;
+
+      n <- n + 1;
+      x <$ dsk;
+      c <- g ^ x;
+      st <- {| pk = pk; epk = c; esk = x |};
+      c_map.[n] <- st;
+      jo <- find (fun _ pk_j=> pk_j = pk) pk_map;
+      if (jo is Some j) {
+        p_map.[n] <- j;
+        i_map.[n] <- c;
+      }
+      return c;
+    }
+
+    proc respond(j: int, c: pdh, ch: bool): (sskey * (pdh * sig)) option = {
+      var k, c', io, sk_j, h, y, sig;
+      var r <- None;
+
+      if (0 < j <= m) {
+        sk_j <- oget sk_map.[j];
+        y <$ dsk;
+        h <- g ^ y;
+        sig <@ S.sign(sk_j, (c, h));
+        c' <- (h, sig);
+        if (has (fun i c' => c' = c) i_map) {
+          k <@ h'(c, h);
+        } else {
+          k <@ RO.get(c, h, c ^ y);
+        }
+        io <- find (fun i _=> p_map.[i] = Some j /\ i_map.[i] = Some c) c_map;
+        if (io is Some i) {
+          (*** Instead of initialising all of r_map to output the
+          empty set, we read undefined entries as the empty set
+          here. ***)
+          r_map.[Some j, i] <- (odflt fset0 r_map.[Some j, i]) `|` fset1 c';
+          if (ch /\ i \notin xp) {
+            if (b_ror) { k <$ dssk; }
+            ich <- ich `|` fset1 i;
+          }
+        }
+        r <- Some (k, c');
+      }
+      return r;
+    }
+
+    proc receive(i: int, c: pdh * sig, ch: bool): sskey option = {
+      var st_i, k, h, sig, b;
+      var ko <- None;
+
+      if (0 < i <= n /\ i \notin q) {
+        st_i <- oget c_map.[i];
+        q <- q `|` fset1 i;
+        
+        if (c \notin odflt fset0 r_map.[p_map.[i], i]) {
+          (h, sig) <- c;
+          b <@ S.verify(st_i.`pk, (st_i.`epk, h), sig);
+          if (b) {
+            k <@ h'(st_i.`epk, h);
+            ko <- Some k;
+          }
+          if (   ch
+              /\ i \notin xp
+              /\ p_map.[i] <> None /\ 0 < oget p_map.[i] <= m /\ oget p_map.[i] \notin cr
+              /\ ko <> None) {
+            bad_2 <- true;
+            if (b_ror) { k <$ dssk; ko <- Some k; }
+            ich <- ich `|` fset1 i;
+          }
+        }
+      }
+      return ko;
+    }
+
+  }
+
+  proc run(b) = {
+    var b';
+
+    RO.init();
+
+    b_ror <- b;
+
+    m <- 0;
+    n <- 0;
+
+    q <- fset0;
+    ich <- fset0;
+    rch <- fset0;
+    xp <- fset0;
+    cr <- fset0;
+
+    p_map <- empty;
+    i_map <- empty;
+    r_map <- empty;
+
+    pk_map <- empty;
+    sk_map <- empty;
+    c_map <- empty;
+
+    bad_1 <- false;
+    bad_2 <- false;
+
+    h_map <- empty;
+
+    b' <@ A(Oracles).distinguish();
+    return b';
+  }
+}.
+
+op p: real.
+local lemma Hop3 b &m:
+  `|Pr[Game2_b.run(b) @ &m: res] - Pr[Game3_b.run(b) @ &m: res]|
+  <= p.
+admitted.
+
+local lemma Reduction &m:
+  `|Pr[Game3_b.run(false) @ &m: res] - Pr[Game3_b.run(true) @ &m: res]|
+  <= Pr[St_CDH(B2(S,A)).run() @ &m: res].
+proof. admitted.
+
+local lemma Security_of_SignedDH &m:
+  `|  Pr[Exp_b(SignedDH(S), RO, A).run(false) @ &m : res]
+    - Pr[Exp_b(SignedDH(S), RO, A).run(true) @ &m : res]|
+  <=   Pr[Game1_b.run(true) @ &m: Game1_b.bad_1]
+     + Pr[Game1_b.run(false) @ &m: Game1_b.bad_1]
+     + Pr[Game2_b.run(true) @ &m : Game1_b.bad_2]
+     + Pr[Game2_b.run(false) @ &m : Game1_b.bad_2]
+     + 2%r * p
+     + Pr[St_CDH(B2(S,A)).run() @ &m: res].
+proof.
+smt(Hop0 Hop1 Hop2 Hop3 Reduction).
+qed.
 end section.
