@@ -7,20 +7,6 @@ require (*--*) St_CDH_abstract SUFCMA UATPaKE.
 (* Starting notes:
    - We (try to) follow Doreen and Paul's model as closely as possible
      while remaining precise.
-   - Whenever the pen and paper definition takes adversarial input in
-     the form of a public key, that is then used to look for the
-     identity of the intended partner, we instead takes input as
-     "either a handle or a public key". This makes our definition more
-     precise (because we don't make an arbitrary choice when two
-     honest parties generate the same key), but also slightly more
-     complex.
-     In order to align with Doreen and Paul's model, we prevent the
-     adversary from presenting us with a public-key that is already
-     associated with a registered server. (Their definition infers
-     intent; we prefer to enforce that adversary actions match
-     intent.)
-   - We probably want signing to be expressed as a multi-forgery game.
-     (TODO: figure this out.)
    - The NIKE is split out as Nominal Group with Gap-DH + RO. The
      entire scheme could be proved assuming an abstract NIKE (with
      m-CKS-heavy security), and that be constructed from NG + Gap-DH +
@@ -112,24 +98,22 @@ module SignedDH (S : SigScheme) (H : RO) : UATPaKE = {
   }
 
   proc resp(sk_s, x_pk) = {
-    var y_sk, s, ss, ks;
+    var y_sk, s, ks;
 
     y_sk <$ dsk;
     s <@ S.sign(sk_s, (x_pk, g ^ y_sk));
-    ss <- x_pk ^ y_sk;
-    ks <@ H.get(x_pk, g ^ y_sk, ss);
+    ks <@ H.get(x_pk, g ^ y_sk, x_pk ^ y_sk);
     return (ks, (g ^ y_sk, s));
   }
 
   proc recv(st, c) = {
-    var y_pk, s, b, ss, kc;
+    var y_pk, s, b, kc;
     var r <- None;
 
     (y_pk, s) <- c;
-    b <@ S.verify(st.`pk, (g ^ st.`esk,  y_pk), s);
+    b <@ S.verify(st.`pk, (st.`epk,  y_pk), s);
     if (b) {
-      ss <- y_pk ^ st.`esk;
-      kc <@ H.get(g ^ st.`esk, y_pk, ss);
+      kc <@ H.get(st.`epk, y_pk, y_pk ^ st.`esk);
       r <- Some kc;
     }
     return r;
@@ -483,8 +467,7 @@ call (: ={glob Exp_b(SignedDH(S), RO)}); last first.
   by call (: true); auto.
 + proc; sp; if; auto; sp; if; auto.
   inline {1} 1.
-  sim.
-  admit.
+  by sim; auto.
 + conseq (: _ ==> ={glob RO, res})=> //.
   by sim.
 qed.
@@ -502,7 +485,12 @@ local module Game1_b = {
       (pk, sk) <@ S.keygen();
       if (has (fun i st=> st.`pk = pk /\ p_map.[i] = None) c_map) {
         bad_1 <- true;
+        (* Pen and paper says "Stop" *)
         (* Here, we don't stop; we just don't actually register the key and move on *)
+        (* The only thing we care about is the rest of the proof,
+           where we want to rely on the fact that each client instance
+           has at most one intended honest partner
+        *)
         pk <- witness;
       } else {
         m <- m + 1;
