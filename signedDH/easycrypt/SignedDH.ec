@@ -1,5 +1,8 @@
-require import AllCore FMap FSet Distr.
+require import AllCore Real FMap FSet Distr.
 require import PROM.
+
+require (*--*) StdOrder.
+(*---*) import StdOrder.RealOrder.
 
 require (*--*) St_CDH_abstract SUFCMA UATPaKE.
 
@@ -346,7 +349,7 @@ local module Game0_b = {
       n <- n + 1;
       x <$ dsk;
       c <- g ^ x;
-      st <- {| pk = pk; epk = g ^ x; esk = x |};
+      st <- {| pk = pk; epk = c; esk = x |};
       c_map.[n] <- st;
       jo <- find (fun _ pk_j=> pk_j = pk) pk_map;
       if (jo is Some j) {
@@ -472,6 +475,7 @@ call (: ={glob Exp_b(SignedDH(S), RO)}); last first.
   by sim.
 qed.
 
+
 local module Game1_b = {
   include var Exp_b(SignedDH(S), RO, A) [-run]
 
@@ -481,7 +485,7 @@ local module Game1_b = {
   module Oracles = {
     proc gen(): pkey = {
       var pk, sk;
-
+  
       (pk, sk) <@ S.keygen();
       if (has (fun i st=> st.`pk = pk /\ p_map.[i] = None) c_map) {
         bad_1 <- true;
@@ -500,30 +504,30 @@ local module Game1_b = {
       
       return pk;
     }
-
+  
     proc corrupt(j: int): skey option = {
       var r <- None;
-
+  
       if (0 < j <= m) {
         r <- sk_map.[j];
         cr <- cr `|` fset1 j;
       }
       return r;
     }
-
+  
     proc expose(i) = {
       var r <- None;
-
+  
       if (0 < i <= n /\ i \notin ich) {
         xp <- xp `|` fset1 i;
         r <- c_map.[i];
       }
       return r;
     }
-
+  
     proc init(pk: pkey): pdh = {
       var st, jo, c, x;
-
+  
       n <- n + 1;
       x <$ dsk;
       c <- g ^ x;
@@ -536,11 +540,11 @@ local module Game1_b = {
       }
       return c;
     }
-
+  
     proc respond(j: int, c: pdh, ch: bool): (sskey * (pdh * sig)) option = {
       var k, c', io, sk_j, h, y, sig;
       var r <- None;
-
+  
       if (0 < j <= m) {
         sk_j <- oget sk_map.[j];
         y <$ dsk;
@@ -563,11 +567,11 @@ local module Game1_b = {
       }
       return r;
     }
-
+  
     proc receive(i: int, c: pdh * sig, ch: bool): sskey option = {
       var st_i, k, h, sig, b;
       var ko <- None;
-
+  
       if (0 < i <= n /\ i \notin q) {
         st_i <- oget c_map.[i];
         q <- q `|` fset1 i;
@@ -590,7 +594,7 @@ local module Game1_b = {
       }
       return ko;
     }
-
+  
     proc h = RO.get
   }
 
@@ -626,10 +630,143 @@ local module Game1_b = {
   }
 }.
 
-local lemma Hop1 b &m:
+(* In order to get the absolute values in, we need to make sure that
+   we can express the bad event on the left of the hop. While we do
+   this, we also set things up nicely to avoid having to reason about
+   equivalence up to bad in manual mode.
+*)
+local module Game05_b = {
+  include var Exp_b(SignedDH(S), RO, A) [-run]
+  include var Game1_b [-run]
+
+  module Oracles = {
+    include Game1_b.Oracles [-gen]
+    proc gen(): pkey = {
+      var pk, sk;
+  
+      (pk, sk) <@ S.keygen();
+      if (has (fun i st=> st.`pk = pk /\ p_map.[i] = None) c_map) {
+        bad_1 <- true;
+        m <- m + 1;
+        pk_map.[m] <- pk;
+        sk_map.[m] <- sk;
+      } else {
+        m <- m + 1;
+        pk_map.[m] <- pk;
+        sk_map.[m] <- sk;
+      }
+      
+      return pk;
+    }
+  }
+
+  proc run(b) = {
+    var b';
+
+    RO.init();
+
+    b_ror <- b;
+
+    m <- 0;
+    n <- 0;
+
+    q <- fset0;
+    ich <- fset0;
+    rch <- fset0;
+    xp <- fset0;
+    cr <- fset0;
+
+    p_map <- empty;
+    i_map <- empty;
+    r_map <- empty;
+
+    pk_map <- empty;
+    sk_map <- empty;
+    c_map <- empty;
+
+    bad_1 <- false;
+    bad_2 <- false;
+
+    b' <@ A(Oracles).distinguish();
+    return b';
+  }
+}.
+
+(** Despite setting things up, the syntactic 'equivalent up to' tactic
+    is failing here for some reason. So we must do it by hand, which
+    requires us assuming that the adversary and the signature scheme
+    terminate.
+
+    This can pop off once the bugs in `byupto` are fixed.
+**)
+(* For all oracles that terminate, the adversary terminates *)
+declare axiom A_ll (O <: UATPaKE_RO_Oracles {-A}):
+     islossless O.gen
+  => islossless O.corrupt
+  => islossless O.expose
+  => islossless O.init
+  => islossless O.respond
+  => islossless O.receive
+  => islossless O.h
+  => islossless A(O).distinguish.
+
+declare axiom S_keygen_ll: islossless S.keygen.
+declare axiom S_sign_ll: islossless S.sign.
+declare axiom S_verify_ll: islossless S.verify.
+
+local lemma Hop1 (b : bool) &m:
   `|Pr[Game0_b.run(b) @ &m: res] - Pr[Game1_b.run(b) @ &m: res]|
   <= Pr[Game1_b.run(b) @ &m: Game1_b.bad_1].
-admitted.
+proof.
+have ->: Pr[Game0_b.run(b) @ &m: res] = Pr[Game05_b.run(b) @ &m: res].
++ byequiv (: ={glob A, glob S, b} ==> ={res})=> //; proc.
+  call (: ={glob Exp_b, glob S, glob RO}); [2..7:by sim|8:by inline; auto].
+  by proc; auto; call (: true); auto=> />.
+byequiv: Game1_b.bad_1=> [||/#] //.
+proc.
+call (: Game1_b.bad_1
+      , ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2}
+      , ={Game1_b.bad_1}).
++ exact: A_ll.
++ by proc; auto; call (: true); auto.
++ move=> &2 bad; proc; auto=> />.
+  by call S_keygen_ll; auto=> />; rewrite bad.
++ move=> &1; proc; auto.
+  by call S_keygen_ll; auto=> />.
++ conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
+  by sim.
++ by move=> &2 bad; proc; auto.
++ by move=> &1; proc; auto.
++ conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
+  by sim.
++ by move=> &2 bad; proc; auto.
++ by move=> &1; proc; auto.
++ conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
+  by sim.
++ move=> &2 bad; proc; auto=> /> &0.
+  by rewrite dsk_ll /= /#.
++ move=> &1; proc; auto=> /> &0.
+  by rewrite dsk_ll /= /#.
++ conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
+  by sim.
++ move=> &2 bad; conseq (: true); proc; islossless.
+  + by match; islossless.
+  + exact: S_sign_ll.
++ move=> &1; conseq (: true); proc; islossless.
+  + by match; islossless.
+  + exact: S_sign_ll.
++ conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
+  by sim.
++ move=> &2 bad; conseq (: true); proc; islossless.
+  exact: S_verify_ll.
++ move=> &1; conseq (: true); proc; islossless.
+  exact: S_verify_ll.
++ conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
+  by sim.
++ by move=> &2 bad; conseq (: true); proc; islossless.
++ by move=> &1; conseq (: true); proc; islossless.
+by inline; auto=> /> /#.
+qed.
 
 local module Game2_b = {
   include var Exp_b(SignedDH(S), RO, A) [-run]
