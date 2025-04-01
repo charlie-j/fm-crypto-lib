@@ -640,7 +640,9 @@ local module Game05_b = {
   include var Game1_b [-run]
 
   module Oracles = {
+    (* The oracles are unchanged from Game1, except for gen *)
     include Game1_b.Oracles [-gen]
+
     proc gen(): pkey = {
       var pk, sk;
   
@@ -718,35 +720,69 @@ local lemma Hop1 (b : bool) &m:
   `|Pr[Game0_b.run(b) @ &m: res] - Pr[Game1_b.run(b) @ &m: res]|
   <= Pr[Game1_b.run(b) @ &m: Game1_b.bad_1].
 proof.
+(* We need to make the bad event appear in the left game for the
+   absolute value to work out; this is just a pure equivalence
+   with a bit of a twist, since we modify *one* of the oracles
+   to branch on the failure event and set bad, but without changing
+   its obserable behaviour. The proof quickly focuses on this. *)
 have ->: Pr[Game0_b.run(b) @ &m: res] = Pr[Game05_b.run(b) @ &m: res].
 + byequiv (: ={glob A, glob S, b} ==> ={res})=> //; proc.
   call (: ={glob Exp_b, glob S, glob RO}); [2..7:by sim|8:by inline; auto].
   by proc; auto; call (: true); auto=> />.
+(* Now, in theory, this could be done by the syntactic check: those
+   two games are syntactically equal except in branches that set bad
+   to true. However, this is borked right now, so we breathe in manual
+   mode, and we prove _semantically_ that:
+   1. Some invariant holds until bad happens, and implies the desired
+   equality of events in final memories;
+   2. Bad happens on both sides at the same time.
+*)
 byequiv: Game1_b.bad_1=> [||/#] //.
 proc.
-call (: Game1_b.bad_1
-      , ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2}
-      , ={Game1_b.bad_1}).
+(* And now we lift the reasoning up to bad to the oracles the
+   adversary has access to. Because we're in manual mode, and the
+   semantics of `equiv` imply equitermination, we *must* also show that
+   everything terminates once bad has occurred (we can no longer rely on
+   the relational reasoning to guarantee thise once the programs are out
+   of sync). In addition, and perhaps obviously, we must prove that
+   the bad even can never unhappen once it has happened.  Keep in mind
+   that it is simply a property of the state (here, the value of a
+   boolean variable), and that the state can be modified
+   programmatically. It isn't some external, untouchable truth. *)
+call (: Game1_b.bad_1 (* the bad event *)
+      , ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2} (* the invariant that holds until bad happens *)
+      , ={Game1_b.bad_1}). (* the invariant that holds after bad happens *)
+(* Goal 1: the adversary terminates if its oracles terminate. See above. *)
 + exact: A_ll.
+(* Goal i.0: if bad does not hold, and the non-bad invariant holds
+   initially, then executing the oracles leads us to memories that are
+   such that the correct invariant holds (depending on whether bad
+   happened during the oracles' execution *)
 + by proc; auto; call (: true); auto.
+(* Goal i.1: the left-hand side oracle terminates and preserves bad *)
 + move=> &2 bad; proc; auto=> />.
   by call S_keygen_ll; auto=> />; rewrite bad.
+(* Goal i.2: the right-hand side oracle terminates and preserves bad *)
 + move=> &1; proc; auto.
   by call S_keygen_ll; auto=> />.
+(* Do those three again for all oracles *)
 + conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
   by sim.
 + by move=> &2 bad; proc; auto.
 + by move=> &1; proc; auto.
+(* And again *)
 + conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
   by sim.
 + by move=> &2 bad; proc; auto.
 + by move=> &1; proc; auto.
+(* And again *)
 + conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
   by sim.
 + move=> &2 bad; proc; auto=> /> &0.
   by rewrite dsk_ll /= /#.
 + move=> &1; proc; auto=> /> &0.
   by rewrite dsk_ll /= /#.
+(* And again *)
 + conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
   by sim.
 + move=> &2 bad; conseq (: true); proc; islossless.
@@ -755,16 +791,20 @@ call (: Game1_b.bad_1
 + move=> &1; conseq (: true); proc; islossless.
   + by match; islossless.
   + exact: S_sign_ll.
+(* And again *)
 + conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
   by sim.
 + move=> &2 bad; conseq (: true); proc; islossless.
   exact: S_verify_ll.
 + move=> &1; conseq (: true); proc; islossless.
   exact: S_verify_ll.
+(* And again *)
 + conseq (: ={glob Exp_b, glob S, glob RO, Game1_b.bad_1, Game1_b.bad_2, res})=> //.
   by sim.
 + by move=> &2 bad; conseq (: true); proc; islossless.
 + by move=> &1; conseq (: true); proc; islossless.
+(* Finally, show that the invariant implies what we wanted (and that
+   the program's preamble establishes the invariant) *)
 by inline; auto=> /> /#.
 qed.
 
