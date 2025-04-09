@@ -1,3 +1,10 @@
+# DEPRECATION
+
+This project has moved to a joined organization: 	https://github.com/proof-ladders/
+
+Its main counterpart is https://github.com/proof-ladders/
+
+
 # Intro
 
 This repository brings together a set of examples for the formal analysis of cryptographic primitives and protocols. Our goal is to provide here a set of cryptographic problems, presented in pdf notes in a way accessible to both cryptographers or formal methods people, as well as a set of solutions for those problems, using distinct tools from the computer-aided cryptography domain.
