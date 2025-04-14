@@ -2,7 +2,7 @@
 
 This project has moved to a joined organization: 	https://github.com/proof-ladders/
 
-Its main counterpart is https://github.com/proof-ladders/
+Its main counterpart is [https://github.com/proof-ladders/](https://github.com/proof-ladders/protocol-ladder)
 
 
 # Intro
